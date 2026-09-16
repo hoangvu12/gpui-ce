@@ -12,17 +12,12 @@ mod haptic_feedback;
 mod keyboard;
 mod pasteboard;
 mod system_notifications;
+mod text_system;
 
 #[cfg(feature = "screen-capture")]
 mod screen_capture;
 
 use gpui_apple::metal_renderer as renderer;
-
-#[cfg(feature = "font-kit")]
-mod open_type;
-
-#[cfg(feature = "font-kit")]
-mod text_system;
 
 mod platform;
 mod window;
@@ -33,9 +28,7 @@ pub(crate) use display::*;
 pub(crate) use display_link::*;
 pub(crate) use keyboard::*;
 pub(crate) use platform::*;
-pub(crate) use window::*;
-
-#[cfg(feature = "font-kit")]
 pub(crate) use text_system::*;
+pub(crate) use window::*;
 
 pub use platform::MacPlatform;
