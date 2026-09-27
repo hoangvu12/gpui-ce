@@ -3284,7 +3284,7 @@ mod tests {
             );
             let end = wrapped
                 .platform_layout
-                .move_visual(CaretPosition::default(), VisualDirection::Right)
+                .adjacent_visual_caret(CaretPosition::default(), VisualDirection::Right)
                 .unwrap();
             assert_eq!(
                 end.index,
@@ -3294,7 +3294,7 @@ mod tests {
             assert_eq!(
                 wrapped
                     .platform_layout
-                    .move_visual(end, VisualDirection::Left)
+                    .adjacent_visual_caret(end, VisualDirection::Left)
                     .unwrap()
                     .index,
                 0,
