@@ -2300,7 +2300,8 @@ fn create_blend_state(device: &ID3D11Device) -> Result<ID3D11BlendState> {
     desc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
     desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
     desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+    // Source-over alpha preserves the backdrop through translucent layers.
+    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
     desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
     unsafe {
         let mut state = None;
@@ -2361,7 +2362,8 @@ fn create_blend_state_for_path_sprite(device: &ID3D11Device) -> Result<ID3D11Ble
     desc.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
     desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
     desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+    // Source-over alpha preserves the backdrop through translucent layers.
+    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
     desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
     unsafe {
         let mut state = None;
@@ -2950,6 +2952,111 @@ mod tests {
             })
             .expect("atlas insert must succeed")
             .expect("atlas insert must produce a tile")
+    }
+
+    // Read the actual swapchain pixels, including alpha consumed by the compositor.
+    // At the overlap, red 50% then blue 50% must leave 25% of the backdrop visible.
+    // The path case traverses path rasterization, atlas resolve and path-sprite blending.
+    fn translucent_layers_image(path_foreground: bool) -> Result<image::RgbaImage> {
+        let window = HiddenWindow::new()?;
+        let devices = DirectXDevices::new()?;
+        let mut renderer = DirectXRenderer::new(window.0, &devices, true)?;
+        renderer.resize(Size {
+            width: DevicePixels(200),
+            height: DevicePixels(100),
+        })?;
+        let mut scene = Scene::default();
+        scene.insert_primitive(Quad {
+            bounds: scaled(10.0, 10.0, 100.0, 80.0),
+            content_mask: full_mask(),
+            background: solid_background(hsla(0.0, 1.0, 0.5, 0.5)),
+            ..Default::default()
+        });
+        let blue = solid_background(hsla(2.0 / 3.0, 1.0, 0.5, 0.5));
+        if path_foreground {
+            let mut builder = gpui::PathBuilder::fill();
+            builder.move_to(gpui::point(gpui::px(60.0), gpui::px(20.0)));
+            builder.line_to(gpui::point(gpui::px(160.0), gpui::px(20.0)));
+            builder.line_to(gpui::point(gpui::px(160.0), gpui::px(80.0)));
+            builder.line_to(gpui::point(gpui::px(60.0), gpui::px(80.0)));
+            builder.close();
+            let mut path = builder.build()?.scale(1.0);
+            path.color = blue;
+            path.content_mask = full_mask();
+            scene.insert_primitive(path);
+        } else {
+            scene.insert_primitive(Quad {
+                bounds: scaled(60.0, 20.0, 100.0, 60.0),
+                content_mask: full_mask(),
+                background: blue,
+                ..Default::default()
+            });
+        }
+        scene.finish();
+        renderer.render_to_image(&scene, WindowBackgroundAppearance::Transparent)
+    }
+
+    fn save_translucent_fixture(name: &str, image: &image::RgbaImage) -> Result<()> {
+        if let Some(directory) = std::env::var_os("GPUI_ALPHA_OUTPUT_DIR") {
+            let directory = std::path::PathBuf::from(directory);
+            std::fs::create_dir_all(&directory)?;
+            image.save(directory.join(format!("{name}-rgba.png")))?;
+            // Side-by-side black/green backgrounds make the remaining transmission visible.
+            // Source pixels are already premultiplied: do not multiply RGB by alpha again.
+            let preview = image::RgbaImage::from_fn(image.width() * 2, image.height(), |x, y| {
+                let [r, g, b, a] = image.get_pixel(x % image.width(), y).0;
+                let green = if x >= image.width() { 255 - a } else { 0 };
+                image::Rgba([r, g.saturating_add(green), b, 255])
+            });
+            preview.save(directory.join(format!("{name}-preview.png")))?;
+        }
+        Ok(())
+    }
+
+    fn assert_translucent_layers(image: &image::RgbaImage) {
+        for (name, x, expected) in [
+            ("clear", 190, [0, 0, 0, 0]),
+            ("red only", 30, [128, 0, 0, 128]),
+            ("blue only", 140, [0, 0, 128, 128]),
+            ("overlap", 80, [64, 0, 128, 191]),
+        ] {
+            let actual = image.get_pixel(x, 50).0;
+            assert!(
+                actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 2),
+                "{name}: rendered premultiplied RGBA {actual:?}, expected {expected:?}"
+            );
+        }
+        // Composite the renderer's measured output onto a green external background.
+        // This checks the visible contribution, not a blend-state descriptor.
+        let [r, g, b, a] = image.get_pixel(80, 50).0;
+        let on_green = [
+            u16::from(r),
+            u16::from(g) + 255 - u16::from(a),
+            u16::from(b),
+        ];
+        assert!(
+            on_green
+                .iter()
+                .zip([64, 64, 128])
+                .all(|(a, e)| a.abs_diff(e) <= 2),
+            "overlap on green: {on_green:?}; backdrop contribution must survive"
+        );
+    }
+
+    #[test]
+    fn translucent_quads_preserve_source_over_output() -> Result<()> {
+        let image = translucent_layers_image(false)?;
+        save_translucent_fixture("quads", &image)?;
+        assert_translucent_layers(&image);
+        Ok(())
+    }
+
+    #[test]
+    fn translucent_path_sprite_preserves_source_over_output() -> Result<()> {
+        let image = translucent_layers_image(true)?;
+        save_translucent_fixture("path", &image)?;
+        assert_translucent_layers(&image);
+        Ok(())
     }
 
     #[test]
