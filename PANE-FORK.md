@@ -80,3 +80,36 @@ the path case; both corrections passed with `[64, 0, 127, 191]`. All 15 Windows
 renderer library tests passed. The initial command without `--features test-support`
 could not compile the baseline test harness; the commands above include it.
 No native macOS/Linux or desktop material claim follows from this result.
+
+## macOS CGColor message correction
+
+Pane's final all-OS CI run 36952982441 (artifact 11206345698) exposed a startup
+abort in the default blurred window. `remove_layer_background`, called by
+`blurred_view_update_layer`, sent Objective-C `NIL` (encoding `@`) to
+`CALayer.setBackgroundColor:`, which requires `CGColorRef` (`^{CGColor=}`).
+objc2's debug verification panicked in an extern-C callback that cannot unwind.
+
+Use `ptr::null::<objc2_core_graphics::CGColor>()` for that argument. The added
+macOS-only direct dependency enables CGColor's existing objc2 encoding; the
+package and version were already in the lockfile. The sibling NSWindow
+`setBackgroundColor_` wrapper correctly passes an NSColor object and remains
+unchanged. The audit found no other raw layer background/border/shadow-color
+setters in gpui_macos or gpui_apple. No material selection, layer filter policy,
+Windows alpha code or retained Windows regression evidence changes.
+
+The macOS-only unit test calls the real recursive clearing function on colored
+parent/child CALayers and checks both backgrounds become null while opacity is
+preserved. Calling outside the extern-C callback lets the original signature
+mismatch fail the test instead of aborting its executable. Run in a native
+macOS checkout (no visible window is needed):
+
+```sh
+cargo +1.98.1 test --locked -j1 -p gpui_ce_macos --features font-kit --lib remove_layer_background_clears_cgcolor_recursively
+```
+
+The original native startup crash is the supplied failing reproduction. This
+Windows development host cannot execute the macOS regression: its compilation
+and positive/negative native results remain for final CI. Pane also adds a
+separate default-startup smoke, independent of its opaque installed/update
+behavior smokes. This ABI correction makes no desktop-blur validation claim
+and does not complete Pane #66.

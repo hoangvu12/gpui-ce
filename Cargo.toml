@@ -210,6 +210,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
   "NSWindow",
   "block2",
 ] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGColor", "objc2"] }
 objc2-core-media = { version = "0.3", default-features = false, features = [
   "CMSampleBuffer",
   "objc2",

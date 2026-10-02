@@ -40,6 +40,7 @@ use objc2_app_kit::{
     NSWindow as Objc2NSWindow, NSWindowButton as Objc2NSWindowButton, NSWindowCollectionBehavior,
     NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
 };
+use objc2_core_graphics::CGColor;
 use objc2_foundation::{
     NSInteger, NSNotFound, NSOperatingSystemVersion, NSPoint as Objc2NSPoint, NSRange,
     NSRangePointer, NSRect as Objc2NSRect, NSSize, NSString, NSUInteger,
@@ -3791,7 +3792,10 @@ unsafe extern "C" fn blurred_view_update_layer(this: &Objc2Object, _: Sel) {
 
 unsafe fn remove_layer_background(layer: ObjcId) {
     unsafe {
-        let _: () = msg_send![layer, setBackgroundColor:NIL];
+        // CALayer takes CGColorRef, not an Objective-C object (NSColor).
+        // A generic NIL has encoding @ and aborts in the updateLayer callback
+        // when objc2 verifies the expected ^{CGColor=} argument in debug builds.
+        let _: () = msg_send![layer, setBackgroundColor: ptr::null::<CGColor>()];
 
         let class_name: ObjcId = msg_send![layer, className];
         if class_name.isEqualToString("CAChameleonLayer").as_bool() {
@@ -3924,6 +3928,35 @@ unsafe extern "C" fn toggle_tab_bar(this: &Objc2Object, _sel: Sel, _id: ObjcId) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_layer_background_clears_cgcolor_recursively() {
+        // Exercise the recursive clearing called by blurred_view_update_layer,
+        // including the real ObjC selector, without a window or event loop.
+        // Outside the extern-C callback a signature panic fails this test
+        // instead of aborting the entire test executable.
+        objc2::rc::autoreleasepool(|_| unsafe {
+            let parent: Retained<Objc2Object> = msg_send![class!(CALayer), new];
+            let child: Retained<Objc2Object> = msg_send![class!(CALayer), new];
+            let color = CGColor::new_generic_rgb(1.0, 0.0, 0.0, 0.5);
+            for layer in [&*parent, &*child] {
+                let _: () = msg_send![layer, setBackgroundColor: &*color];
+                let background: *const CGColor = msg_send![layer, backgroundColor];
+                assert!(!background.is_null(), "fixture must start with a color");
+            }
+            let _: () = msg_send![&*child, setOpacity: 0.5f32];
+            let _: () = msg_send![&*parent, addSublayer: &*child];
+
+            remove_layer_background(Retained::as_ptr(&parent).cast_mut());
+
+            for layer in [&*parent, &*child] {
+                let background: *const CGColor = msg_send![layer, backgroundColor];
+                assert!(background.is_null(), "every layer background must clear");
+            }
+            let opacity: f32 = msg_send![&*child, opacity];
+            assert_eq!(opacity, 0.5, "unrelated layer opacity must stay unchanged");
+        });
+    }
 
     #[test]
     fn display_id_for_screen_returns_none_for_null_screen() {
