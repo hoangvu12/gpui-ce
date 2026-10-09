@@ -1071,6 +1071,12 @@ impl<'app> EditableTextActionHandler<Context<'app, Self>> for EditableTextState 
         if !self.selected_range.is_empty() {
             let slice = &self.storage.content_utf8()[self.selected_range.range()];
             cx.write_to_clipboard(ClipboardItem::new_string(slice.to_string()));
+        } else {
+            // Nothing is selected, so there is nothing this copy can do:
+            // propagate the action, so a key an application binds beneath
+            // the field (Pane runs the selected row's own action) sees it
+            // instead of the press ending here having done nothing.
+            cx.propagate();
         }
     }
 
@@ -1644,6 +1650,25 @@ mod tests {
         let clipboard = cx.read_from_clipboard();
         assert!(clipboard.is_some());
         assert_eq!(clipboard.unwrap().text().as_deref(), Some("world"));
+    }
+
+    #[gpui::test]
+    fn test_copy_without_selection_copies_nothing(cx: &mut TestAppContext) {
+        // The clipboard keeps what it held: with nothing selected the
+        // copy has nothing to do, and its action asks to go on (Pane's
+        // window tests check what the key then runs) instead of
+        // replacing the clipboard with an empty copy.
+        cx.write_to_clipboard(ClipboardItem::new_string("kept".to_string()));
+        let view = create_test_input(cx, "hello world", 5);
+        view.update(cx, |view, window, cx| {
+            view.input.update(cx, |input, cx| {
+                input.copy(&Copy, window, cx);
+            });
+        })
+        .unwrap();
+
+        let clipboard = cx.read_from_clipboard();
+        assert_eq!(clipboard.unwrap().text().as_deref(), Some("kept"));
     }
 
     #[gpui::test]

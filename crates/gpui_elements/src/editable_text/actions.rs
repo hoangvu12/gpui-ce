@@ -251,7 +251,9 @@ pub trait EditableTextActionHandler<Context>: Sized {
 
     /// Cut selected text to clipboard.
     fn cut(&mut self, _: &Cut, _w: &mut Window, _cx: &mut Context) {}
-    /// Copy selected text to clipboard.
+    /// Copy selected text to clipboard. With nothing selected, the
+    /// default handler propagates the action so a binding beneath the
+    /// field can run the key instead.
     fn copy(&mut self, _: &Copy, _w: &mut Window, _cx: &mut Context) {}
     /// Paste from clipboard at the cursor position.
     fn paste(&mut self, _: &Paste, _w: &mut Window, _cx: &mut Context) {}

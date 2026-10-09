@@ -113,3 +113,31 @@ and positive/negative native results remain for final CI. Pane also adds a
 separate default-startup smoke, independent of its opaque installed/update
 behavior smokes. This ABI correction makes no desktop-blur validation claim
 and does not complete Pane #66.
+
+## Empty copy propagates (Pane #251)
+
+Pane's launcher rule (issue #251): Ctrl+C with a non-empty selection in a
+focused field copies the selected text, and with no selection the key goes
+on so the row under the field can run an action bound to it. The field's
+own copy was dispatched first by the keymap and, doing nothing with an
+empty selection, ended the press there — the row's action could never run.
+
+`EditableTextState::copy` in `gpui_ce_elements` now calls `cx.propagate()`
+when the selection is empty. A copy that copies still stops the action as
+before. This is the only editable-text behavior change: no other action
+propagates, `cut` still swallows (its no-selection behavior of cutting the
+line is unchanged), and the keybinding itself is untouched.
+
+The in-file unit test pins that an empty selection writes nothing to the
+clipboard. The propagation itself is observable only through the dispatch
+order, which Pane's own window tests cover (`crates/pane/tests/chords.rs`
+in the pane repository: the field's selection wins, and the row's action
+runs with none). Run the unit test from this checkout:
+
+```sh
+cargo +1.98.1 test --locked -p gpui_ce_elements --lib test_copy_without
+```
+
+No platform, renderer or layout code changes. The commit sits on
+`pane/source-over-alpha` above `5d27954ce5305447bb97d1d7b89b0db9b7a2c59c`,
+as the maintenance policy above requires.
