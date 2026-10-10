@@ -36,9 +36,10 @@ use objc2::{
 use objc2_app_kit::{
     NSAlert, NSAlertStyle, NSBackingStoreType, NSBeep, NSButton as Objc2NSButton,
     NSEventModifierFlags, NSEventType, NSRequestUserAttentionType, NSScreen, NSView as Objc2NSView,
-    NSViewLayerContentsRedrawPolicy, NSVisualEffectMaterial, NSVisualEffectState,
-    NSWindow as Objc2NSWindow, NSWindowButton as Objc2NSWindowButton, NSWindowCollectionBehavior,
-    NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSViewLayerContentsRedrawPolicy, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
+    NSVisualEffectState, NSWindow as Objc2NSWindow, NSWindowButton as Objc2NSWindowButton,
+    NSWindowCollectionBehavior, NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask,
+    NSWindowTitleVisibility,
 };
 use objc2_core_graphics::CGColor;
 use objc2_foundation::{
@@ -3776,7 +3777,17 @@ unsafe extern "C" fn blurred_view_init_with_frame(
         let view = msg_send![super(this, class!(NSVisualEffectView)), initWithFrame: frame];
         // Use a colorless semantic material. The default value `AppearanceBased`, though not
         // manually set, is deprecated.
-        let _: () = msg_send![view, setMaterial: NSVisualEffectMaterial::Selection];
+        //
+        // `UnderWindowBackground` rather than `Selection`: on macOS 26+, `Selection` no longer
+        // vends the `CABackdropLayer` that `remove_layer_background` walks, so the view renders
+        // with no blur at all. `UnderWindowBackground` still vends one, and is the material
+        // AppKit documents for the area behind a window's own background.
+        let material = NSVisualEffectMaterial::UnderWindowBackground;
+        let _: () = msg_send![view, setMaterial: material];
+        // Behind-window blending is what samples the desktop rather than the window's own
+        // content. It is already the default, but this view exists only for that mode.
+        let blending = NSVisualEffectBlendingMode::BehindWindow;
+        let _: () = msg_send![view, setBlendingMode: blending];
         let _: () = msg_send![view, setState: NSVisualEffectState::Active];
         view
     }
@@ -3787,8 +3798,24 @@ unsafe extern "C" fn blurred_view_update_layer(this: &Objc2Object, _: Sel) {
         let _: () = msg_send![super(this, class!(NSVisualEffectView)), updateLayer];
         let layer: ObjcId = msg_send![this, layer];
         if !layer.is_null() {
-            remove_layer_background(layer);
+            strip_backgrounds_and_lay_the_snapshot_base(layer);
         }
+    }
+}
+
+/// Clear what `remove_layer_background` clears from the blur view's layer
+/// tree, then lay an opaque black base under the backdrop sublayer. Mission
+/// Control and the Spaces switcher render window snapshots, which omit
+/// backdrop layers entirely — with every background stripped, the window
+/// would read as fully transparent glass over the raw desktop there. The
+/// opaque base is covered by the live blur in normal compositing, but keeps
+/// the snapshot reading as a solid dark surface (how stock vibrancy
+/// materials degrade).
+unsafe fn strip_backgrounds_and_lay_the_snapshot_base(layer: ObjcId) {
+    unsafe {
+        remove_layer_background(layer);
+        let black = CGColor::new_generic_rgb(0., 0., 0., 1.);
+        let _: () = msg_send![layer, setBackgroundColor: &*black];
     }
 }
 
@@ -3930,6 +3957,7 @@ unsafe extern "C" fn toggle_tab_bar(this: &Objc2Object, _sel: Sel, _id: ObjcId) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use objc2::rc::Allocated;
 
     #[test]
     fn remove_layer_background_clears_cgcolor_recursively() {
@@ -3957,6 +3985,67 @@ mod tests {
             }
             let opacity: f32 = msg_send![&*child, opacity];
             assert_eq!(opacity, 0.5, "unrelated layer opacity must stay unchanged");
+        });
+    }
+
+    #[test]
+    fn blurred_view_selects_the_under_window_background_material() {
+        // `Selection` stopped vending the `CABackdropLayer` on newer macOS,
+        // leaving a blur request rendered with none; the subclass must keep
+        // the material that still vends one. Reading the properties back
+        // exercises the real registered subclass and AppKit storage, not the
+        // source constants.
+        objc2::rc::autoreleasepool(|_| unsafe {
+            let view: Allocated<Objc2Object> = msg_send![&*BLURRED_VIEW_CLASS, alloc];
+            let frame = Objc2NSRect::new(Objc2NSPoint::new(0., 0.), NSSize::new(10., 10.));
+            let view: Retained<Objc2Object> = msg_send![view, initWithFrame: frame];
+            let material: NSInteger = msg_send![&*view, material];
+            assert_eq!(
+                material,
+                NSVisualEffectMaterial::UnderWindowBackground.0,
+                "the vibrancy material must still vend a backdrop layer"
+            );
+            let blending: NSInteger = msg_send![&*view, blendingMode];
+            assert_eq!(
+                blending,
+                NSVisualEffectBlendingMode::BehindWindow.0,
+                "the view must sample what is behind the window"
+            );
+            let state: NSInteger = msg_send![&*view, state];
+            assert_eq!(
+                state,
+                NSVisualEffectState::Active.0,
+                "the vibrancy look must stay active"
+            );
+        });
+    }
+
+    #[test]
+    fn blurred_view_update_layer_bases_window_snapshots_on_opaque_black() {
+        // updateLayer strips every background the backdrop tree carries; the
+        // base laid back under the (snapshot-omitted) backdrop sublayer keeps
+        // Mission Control and Spaces reads solid, not fully transparent glass.
+        objc2::rc::autoreleasepool(|_| unsafe {
+            let parent: Retained<Objc2Object> = msg_send![class!(CALayer), new];
+            let child: Retained<Objc2Object> = msg_send![class!(CALayer), new];
+            let color = CGColor::new_generic_rgb(1.0, 0.0, 0.0, 0.5);
+            for layer in [&*parent, &*child] {
+                let _: () = msg_send![layer, setBackgroundColor: &*color];
+            }
+            let _: () = msg_send![&*parent, addSublayer: &*child];
+
+            strip_backgrounds_and_lay_the_snapshot_base(Retained::as_ptr(&parent).cast_mut());
+
+            // The root layer holds the opaque black base; the sublayer the
+            // recursion cleared stays cleared.
+            let base: *const CGColor = msg_send![&*parent, backgroundColor];
+            assert!(!base.is_null(), "the base must be laid under the backdrop");
+            let black = CGColor::new_generic_rgb(0., 0., 0., 1.);
+            let black_ptr: *const CGColor = &*black;
+            let equal = CFEqual(base.cast(), black_ptr.cast());
+            assert_eq!(equal, 1, "the base must be the opaque black");
+            let cleared: *const CGColor = msg_send![&*child, backgroundColor];
+            assert!(cleared.is_null(), "the sublayer's background stays cleared");
         });
     }
 

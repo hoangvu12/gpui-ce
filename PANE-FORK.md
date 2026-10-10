@@ -141,3 +141,46 @@ cargo +1.98.1 test --locked -p gpui_ce_elements --lib test_copy_without
 No platform, renderer or layout code changes. The commit sits on
 `pane/source-over-alpha` above `5d27954ce5305447bb97d1d7b89b0db9b7a2c59c`,
 as the maintenance policy above requires.
+
+## Under-window vibrancy material (Pane #66)
+
+`blurred_view_init_with_frame` now selects
+`NSVisualEffectMaterial::UnderWindowBackground` with
+`NSVisualEffectBlendingMode::BehindWindow` and `NSVisualEffectState::Active`
+instead of `Selection`. On macOS 26+, `Selection` no longer vends the
+`CABackdropLayer` that `remove_layer_background` walks, so a blur request
+rendered with no blur at all. `UnderWindowBackground` still vends one, and is
+the material AppKit documents for the area behind a window's own background.
+`blurred_view_update_layer` now calls the new
+`strip_backgrounds_and_lay_the_snapshot_base`, which clears what
+`remove_layer_background` clears and then lays an opaque black base under the
+backdrop sublayer. Mission Control and the Spaces switcher render window
+snapshots, which omit backdrop layers entirely; with every background
+stripped, the window would read as fully transparent glass over the raw
+desktop there. The base is covered by the live blur in normal compositing
+and keeps the snapshot reading as a solid dark surface, how stock vibrancy
+materials degrade.
+
+The material correction is adapted from Zui's
+`blurred_view_init_with_frame` — the wingleeio/zed GPUI lineage, at its
+`crates/gpui_macos/src/window.rs`. The spec's Zui evidence anchor `ec16c62b`
+is no longer fetchable, so the correction is read from Zui's current line.
+Only this material selection and its snapshot base are adapted: no Zui blur
+engine and no other Zui changes. Windows source-over code and its regression
+evidence are unchanged.
+
+Two macOS-only unit tests pin the seam. One reads `material`, `blendingMode`
+and `state` back from the real registered subclass and its AppKit storage;
+the other exercises the real layer-tree function on colored parent/child
+CALayers, checking that the root layer holds the opaque black base while the
+recursed sublayer stays cleared. Native macOS runs them; they claim nothing
+about compositor blur quality. Run from this checkout:
+
+```sh
+cargo +1.98.1 test --locked -j1 -p gpui_ce_macos --features font-kit --lib blurred_view
+cargo +1.98.1 test --locked -j1 -p gpui_ce_macos --features font-kit --lib remove_layer_background_clears_cgcolor_recursively
+```
+
+The commit sits on `pane/source-over-alpha` above
+`70ed267181dc56e4739d5782eb56fae51a2afd29`, as the maintenance policy above
+requires.
